@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server.config import settings
 from server.stt.groq_stt import transcribe_groq
-from server.tts.supertonic_client import synthesize, get_voices, get_languages
+from server.tts.supertonic_client import synthesize, get_voices as _get_voices, get_languages as _get_languages
 
 
 # Черга повідомлень — я (Pi) пишу сюди відповіді, веб-інтерфейс показує
@@ -58,12 +58,12 @@ async def update_config(data: dict):
 
 @app.get("/api/voices")
 async def voices():
-    return await get_voices()
+    return _get_voices()
 
 
 @app.get("/api/languages")
 async def languages():
-    return await get_languages()
+    return _get_languages()
 
 
 @app.post("/api/stt/groq")

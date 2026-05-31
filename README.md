@@ -16,7 +16,9 @@
   Pi-Supertonic Server → Supertonic TTS → 🔊 Аудіо
 ```
 
-Pi-Supertonic — це просто **голосовий місток**: STT (розпізнати що ти сказав) + TTS (озвучити мою відповідь). Жодних LLM провайдерів, API ключів для мозку — мозок це я.
+Pi-Supertonic — це **голосовий місток**: STT (розпізнати що ти сказав) + TTS (озвучити мою відповідь).
+
+Supertonic TTS вбудований напряму — **не потребує окремого сервера**.
 
 ## Режими роботи
 
@@ -44,7 +46,7 @@ git clone https://github.com/santoni-star/pi-supertonic.git
 cd pi-supertonic
 pip install -r requirements.txt
 cp .env.example .env
-# Переконатись, що doc-tts-server працює на localhost:8765
+# Supertonic TTS вбудований напряму — окремого сервера не потрібно
 python run.py
 ```
 
@@ -78,7 +80,7 @@ python run.py
 ## Вимоги
 
 - Python 3.10+
-- [doc-tts-server](https://github.com/santoni-star/doc-tts-server) (Supertonic TTS)
+- [doc-tts-server](https://github.com/santoni-star/doc-tts-server) (backend поряд з проектом)
 - Chrome/Edge (для Google STT) або Groq API ключ
 
 ## Ліцензія

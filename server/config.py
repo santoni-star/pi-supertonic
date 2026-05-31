@@ -10,8 +10,7 @@ CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 
 
 class Settings(BaseSettings):
-    # TTS (Supertonic server)
-    tts_api_url: str = "http://127.0.0.1:8765"
+    # TTS (Supertonic — локально, без окремого сервера)
     tts_voice: str = "F1"
     tts_lang: str = "uk"
     tts_speed: float = 1.05
@@ -30,7 +29,6 @@ class Settings(BaseSettings):
 
     def save(self):
         data = {
-            "tts_api_url": self.tts_api_url,
             "tts_voice": self.tts_voice,
             "tts_lang": self.tts_lang,
             "tts_speed": self.tts_speed,
