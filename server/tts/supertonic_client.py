@@ -33,8 +33,9 @@ async def synthesize(
     fmt: str = "",
 ) -> bytes:
     """Відправляє текст на синтез і повертає аудіо (WAV/MP3 bytes)."""
+    import uuid
     payload = {
-        "task_id": f"pi-{hash(text) & 0xFFFFFFFF}",
+        "task_id": f"pi-{uuid.uuid4().hex[:12]}",
         "text": text,
         "voice": voice or settings.tts_voice,
         "lang": lang or settings.tts_lang,

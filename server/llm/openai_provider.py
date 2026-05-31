@@ -10,8 +10,15 @@ from server.llm.base import LLMProvider
 
 class OpenAIProvider(LLMProvider):
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = settings.openai_model
+
+    @property
+    def _client(self) -> AsyncOpenAI:
+        if not settings.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY не налаштовано. Додай ключ у налаштуваннях (⚙️) або в .env"
+            )
+        return AsyncOpenAI(api_key=settings.openai_api_key)
 
     async def chat(
         self,
@@ -24,7 +31,7 @@ class OpenAIProvider(LLMProvider):
             if system_prompt
             else messages
         )
-        stream_obj = await self.client.chat.completions.create(
+        stream_obj = await self._client.chat.completions.create(
             model=self.model,
             messages=full_messages,
             temperature=0.7,
@@ -41,7 +48,7 @@ class OpenAIProvider(LLMProvider):
             if system_prompt
             else messages
         )
-        response = await self.client.chat.completions.create(
+        response = await self._client.chat.completions.create(
             model=self.model,
             messages=full_messages,
             temperature=0.7,

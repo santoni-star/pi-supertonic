@@ -125,19 +125,25 @@ async function sendTextMessage() {
       }),
     });
 
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
     const data = await resp.json();
 
     // Видаляємо "думає"
     removeMessage(thinkingId);
 
+    if (!resp.ok) {
+      addMessage(`❌ ${data.detail || data.error || 'Помилка сервера'}`, 'system');
+      return;
+    }
+
     // Додаємо відповідь
     const msgId = addMessage(data.response_text, 'assistant');
 
-    // Програємо аудіо
+    // Програємо аудіо (якщо є)
     if (data.audio) {
       playAudio(data.audio, data.format, msgId);
+    }
+    if (data.error) {
+      console.warn('TTS note:', data.error);
     }
   } catch (err) {
     removeMessage(thinkingId);
@@ -718,12 +724,8 @@ function base64ToArrayBuffer(base64) {
 }
 
 // ---------- Interruption detection: перебивання в реальному часі ----------
+// Окремий аудіо-потік тільки для детекції перебивання
 
-// У VAD процесорі ми вже перевіряємо state.isSpeaking
-// Коли isSpeaking = true, ми не записуємо аудіо
-// Але нам треба detectити, що користувач почав говорити під час відтворення
-
-// Додатковий мікрофонний моніторинг для перебивання
 async function setupInterruptDetector() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -738,7 +740,6 @@ async function setupInterruptDetector() {
     processor.connect(audioCtx.destination);
 
     processor.onaudioprocess = (event) => {
-      // Працює тільки в realtime режимі, коли асистент говорить
       if (state.mode !== 'realtime' || !state.isSpeaking) return;
 
       const input = event.inputBuffer.getChannelData(0);
@@ -751,10 +752,9 @@ async function setupInterruptDetector() {
       if (rms > INTERRUPT_THRESHOLD) {
         if (!speechDuringPlayback) {
           speechDuringPlayback = true;
-          // Користувач перебиває!
           interruptPlayback();
           voiceStatus.textContent = '🛑 Перебив. Слухаю...';
-          state.isSpeaking = false;  // Дозволяємо VAD записувати
+          state.isSpeaking = false;
         }
       } else {
         speechDuringPlayback = false;
@@ -764,22 +764,12 @@ async function setupInterruptDetector() {
     state.interruptProcessor = processor;
     state.interruptStream = stream;
     state.interruptAudioCtx = audioCtx;
-
   } catch (err) {
     console.warn('Interrupt detector setup failed:', err);
   }
 }
 
-// Модифікуємо connectRealtime, щоб також запускати interrupt detector
-const origConnectRealtime = connectRealtime;
-connectRealtime = function() {
-  origConnectRealtime.call(this);
-  setupInterruptDetector();
-};
-
-const origDisconnectRealtime = disconnectRealtime;
-disconnectRealtime = function() {
-  origDisconnectRealtime.call(this);
+function stopInterruptDetector() {
   if (state.interruptProcessor) {
     state.interruptProcessor.disconnect();
     state.interruptProcessor = null;
@@ -792,12 +782,21 @@ disconnectRealtime = function() {
     state.interruptStream.getTracks().forEach(t => t.stop());
     state.interruptStream = null;
   }
+}
+
+// Обгортаємо connectRealtime з interrupt детектором
+const _origConnectRealtime = connectRealtime;
+const _origDisconnectRealtime = disconnectRealtime;
+
+connectRealtime = function() {
+  _origConnectRealtime.call(this);
+  setupInterruptDetector();
 };
 
-// Також потрібна перевірка перебивання в основному VAD
-// В startRealtimeMic, processor.onaudioprocess:
-// Коли state.isSpeaking = true, ми пропускаємо запис.
-// Але interrupt detector окремо слухає і перериває.
+disconnectRealtime = function() {
+  _origDisconnectRealtime.call(this);
+  stopInterruptDetector();
+};
 
 // ---------- Start ----------
 

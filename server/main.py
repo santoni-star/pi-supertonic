@@ -7,11 +7,9 @@
 
 import asyncio
 import json
-import time
 import base64
 import uuid
 from contextlib import asynccontextmanager
-from typing import Literal
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -25,8 +23,20 @@ from server.tts.supertonic_client import synthesize, get_voices, get_languages
 
 # ---------- стан ----------
 
-llm = get_llm_provider()
+_llm = None
 conversation_history: list[dict] = []
+
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        _llm = get_llm_provider()
+    return _llm
+
+
+def reset_llm():
+    global _llm
+    _llm = None
 system_prompt = (
     "Ти — Pi-Supertonic, голосовий асистент. Відповідай природно, "
     "розмовною українською мовою. Відповіді мають бути короткими "
@@ -62,9 +72,15 @@ async def get_config():
 @app.post("/api/config")
 async def update_config(data: dict):
     """Оновлює налаштування (в цій сесії)."""
+    llm_changed = False
     for key, value in data.items():
         if hasattr(settings, key):
+            old = getattr(settings, key)
             setattr(settings, key, value)
+            if key in ("llm_provider", "groq_api_key", "openai_api_key"):
+                llm_changed = True
+    if llm_changed:
+        reset_llm()  # перестворимо провайдер при наступному запиті
     return {"ok": True}
 
 
@@ -102,18 +118,36 @@ async def chat_endpoint(data: dict):
     conversation_history.append({"role": "user", "content": user_text})
 
     # LLM
-    response_text = await llm.chat_sync(conversation_history, system_prompt)
+    llm = get_llm()
+    try:
+        response_text = await llm.chat_sync(conversation_history, system_prompt)
+    except ValueError as e:
+        conversation_history.pop()
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        conversation_history.pop()
+        raise HTTPException(502, f"LLM error: {e}")
+
     conversation_history.append({"role": "assistant", "content": response_text})
 
     # TTS
-    audio_bytes = await synthesize(
-        text=response_text,
-        voice=data.get("voice", settings.tts_voice),
-        lang=data.get("lang", settings.tts_lang),
-        speed=data.get("speed", settings.tts_speed),
-        steps=data.get("steps", settings.tts_steps),
-        fmt=data.get("format", settings.tts_format),
-    )
+    try:
+        audio_bytes = await synthesize(
+            text=response_text,
+            voice=data.get("voice", settings.tts_voice),
+            lang=data.get("lang", settings.tts_lang),
+            speed=data.get("speed", settings.tts_speed),
+            steps=data.get("steps", settings.tts_steps),
+            fmt=data.get("format", settings.tts_format),
+        )
+    except Exception as e:
+        # TTS error but LLM worked — повертаємо хоча б текст
+        return JSONResponse({
+            "response_text": response_text,
+            "audio": None,
+            "format": settings.tts_format,
+            "error": f"TTS error: {e}",
+        })
 
     return JSONResponse({
         "response_text": response_text,
@@ -130,7 +164,16 @@ async def chat_text_endpoint(data: dict):
         raise HTTPException(400, "text is required")
 
     conversation_history.append({"role": "user", "content": user_text})
-    response_text = await llm.chat_sync(conversation_history, system_prompt)
+    llm = get_llm()
+    try:
+        response_text = await llm.chat_sync(conversation_history, system_prompt)
+    except ValueError as e:
+        conversation_history.pop()
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        conversation_history.pop()
+        raise HTTPException(502, f"LLM error: {e}")
+
     conversation_history.append({"role": "assistant", "content": response_text})
     return {"response_text": response_text}
 
@@ -194,10 +237,15 @@ async def websocket_endpoint(ws: WebSocket):
 
                     # LLM
                     await ws.send_json({"type": "status", "message": "thinking..."})
+                    llm = get_llm()
                     full_response = ""
-                    async for chunk in llm.chat(local_history, system_prompt, stream=True):
-                        full_response += chunk
-                        await ws.send_json({"type": "llm_chunk", "text": chunk})
+                    try:
+                        async for chunk in llm.chat(local_history, system_prompt, stream=True):
+                            full_response += chunk
+                            await ws.send_json({"type": "llm_chunk", "text": chunk})
+                    except Exception as e:
+                        await ws.send_json({"type": "error", "message": f"LLM error: {e}"})
+                        continue
 
                     local_history.append({"role": "assistant", "content": full_response})
 

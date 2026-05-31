@@ -11,13 +11,20 @@ from server.llm.base import LLMProvider
 
 class GroqProvider(LLMProvider):
     def __init__(self):
-        self.api_key = settings.groq_api_key
         self.base_url = "https://api.groq.com/openai/v1"
         self.model = "llama-3.3-70b-versatile"
 
+    @property
+    def _api_key(self) -> str:
+        return settings.groq_api_key
+
     async def _post(self, body: dict, stream: bool = True):
+        if not self._api_key:
+            raise ValueError(
+                "GROQ_API_KEY не налаштовано. Додай ключ у налаштуваннях (⚙️) або в .env"
+            )
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=60) as client:
