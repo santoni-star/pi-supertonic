@@ -626,14 +626,16 @@ function escapeHtml(text) {
 // ---------- Settings ----------
 
 function updateSettingsUI() {
-  $('#selLLM').value = state.llmProvider;
-  $('#selVoice').value = state.voice;
-  $('#selLang').value = state.lang;
-  $('#selSpeed').value = state.speed;
-  $('#speedLabel').textContent = state.speed;
-  $('#selSteps').value = state.steps;
-  $('#stepsLabel').textContent = state.steps;
-  $('#selFormat').value = state.format;
+  $('#selLLM').value = state.llmProvider || 'groq';
+  $('#groqKey').value = state.groq_api_key || '';
+  $('#openaiKey').value = state.openai_api_key || '';
+  $('#selVoice').value = state.voice || 'F1';
+  $('#selLang').value = state.lang || 'uk';
+  $('#selSpeed').value = state.speed || 1.05;
+  $('#speedLabel').textContent = state.speed || 1.05;
+  $('#selSteps').value = state.steps || 8;
+  $('#stepsLabel').textContent = state.steps || 8;
+  $('#selFormat').value = state.format || 'mp3';
 
   // STT radio
   const sttRadio = document.querySelector(`input[name="stt"][value="${state.sttProvider}"]`);

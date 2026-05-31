@@ -57,9 +57,13 @@ app = FastAPI(title="Pi-Supertonic", version="0.1.0", lifespan=lifespan)
 
 @app.get("/api/config")
 async def get_config():
-    """Поточна конфігурація (без секретів)."""
+    """Поточна конфігурація."""
     return {
         "llm_provider": settings.llm_provider,
+        "groq_api_key": settings.groq_api_key,
+        "openai_api_key": settings.openai_api_key,
+        "openai_model": settings.openai_model,
+        "ollama_model": settings.ollama_model,
         "tts_voice": settings.tts_voice,
         "tts_lang": settings.tts_lang,
         "tts_speed": settings.tts_speed,
@@ -81,6 +85,7 @@ async def update_config(data: dict):
                 llm_changed = True
     if llm_changed:
         reset_llm()  # перестворимо провайдер при наступному запиті
+    settings.save()
     return {"ok": True}
 
 

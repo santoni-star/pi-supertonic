@@ -1,7 +1,13 @@
-"""Pi-Supertonic — конфігурація."""
+"""Pi-Supertonic — конфігурація з JSON-персистентністю."""
+
+import json
+import os
+from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
-from typing import Literal
+
+CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 
 
 class Settings(BaseSettings):
@@ -30,5 +36,48 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
+    def save(self):
+        """Зберігає поточні налаштування в config.json."""
+        data = {
+            "llm_provider": self.llm_provider,
+            "groq_api_key": self.groq_api_key,
+            "openai_api_key": self.openai_api_key,
+            "openai_model": self.openai_model,
+            "ollama_base_url": self.ollama_base_url,
+            "ollama_model": self.ollama_model,
+            "groq_stt_model": self.groq_stt_model,
+            "tts_api_url": self.tts_api_url,
+            "tts_voice": self.tts_voice,
+            "tts_lang": self.tts_lang,
+            "tts_speed": self.tts_speed,
+            "tts_steps": self.tts_steps,
+            "tts_format": self.tts_format,
+            "host": self.host,
+            "port": self.port,
+        }
+        CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    def load_json(self):
+        """Довантажує значення з config.json (перекривають .env)."""
+        if not CONFIG_FILE.exists():
+            return
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            for key, value in data.items():
+                if hasattr(self, key) and value is not None:
+                    # Приводимо до правильного типу
+                    field_type = self.model_fields.get(key)
+                    if field_type:
+                        if field_type.annotation is float:
+                            value = float(value)
+                        elif field_type.annotation is int:
+                            value = int(value)
+                    setattr(self, key, value)
+            print(f"[config] loaded from {CONFIG_FILE}")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[config] error loading {CONFIG_FILE}: {e}")
+
+
+# Єдиний екземпляр (ініціалізується з .env, потім config.json)
 settings = Settings()
+settings.load_json()
