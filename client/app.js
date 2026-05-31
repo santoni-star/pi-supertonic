@@ -93,7 +93,7 @@ async function init() {
   console.log('Pi-Supertonic initialized — мозок: Pi');
 }
 
-// ---------- Chat mode: текст → TTS ----------
+// ---------- Chat mode: текст → TTS (автоматично) ----------
 
 async function sendTextMessage() {
   const text = textInput.value.trim();
@@ -104,25 +104,58 @@ async function sendTextMessage() {
   textInput.disabled = true;
   btnSend.disabled = true;
 
-  // STT повідомлення просто показуємо в чаті.
-  // Я (Pi) відповідаю тут, у цьому самому чаті.
-  // Для озвучення використовуй:  !speak <текст>
-  // Або скопіюй мою відповідь і натисни "Speak" в інтерфейсі.
+  // !speak команда — озвучити без чату
+  if (text.startsWith('!speak ')) {
+    const speakText = text.slice(7).trim();
+    if (speakText) {
+      await speakText(speakText);
+    }
+    textInput.disabled = false;
+    btnSend.disabled = false;
+    textInput.focus();
+    return;
+  }
 
-  // Показуємо підказку
-  const hintId = addMessage(
-    '💡 Текст отримано. Я (Pi) бачу його і відповідаю тут. ' +
-    'Скопіюй мою відповідь і натисни 🎤 "Speak", або використай !speak',
-    'system'
-  );
+  // Автоматично озвучуємо текст через TTS
+  await speakTextInternal(text);
 
   textInput.disabled = false;
   btnSend.disabled = false;
   textInput.focus();
 }
 
-// ---------- Speak: озвучити текст через TTS ----------
+// Внутрішня функція озвучення (без додавання повідомлення)
+async function speakTextInternal(text) {
+  try {
+    const resp = await fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        voice: state.voice,
+        lang: state.lang,
+        speed: state.speed,
+        steps: state.steps,
+        format: state.format,
+      }),
+    });
 
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: 'HTTP ' + resp.status }));
+      addMessage(`❌ TTS помилка: ${err.detail}`, 'system');
+      return;
+    }
+
+    const data = await resp.json();
+    if (data.audio) {
+      playAudio(data.audio, data.format);
+    }
+  } catch (err) {
+    addMessage(`❌ Помилка: ${err.message}`, 'system');
+  }
+}
+
+// Публічна функція озвучення (з позначкою в чаті)
 async function speakText(text, showInChat = true) {
   if (!text || !text.trim()) return;
 
@@ -142,7 +175,7 @@ async function speakText(text, showInChat = true) {
 
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: 'HTTP ' + resp.status }));
-      addMessage(`❌ TTS помилка: ${err.detail || 'невідома'}`, 'system');
+      addMessage(`❌ TTS помилка: ${err.detail}`, 'system');
       return;
     }
 
@@ -729,24 +762,6 @@ function base64ToArrayBuffer(base64) {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
-
-// ---------- !speak команда ----------
-// Якщо ввести в текстове поле "!speak Привіт" — текст озвучиться
-
-const _origSend = sendTextMessage;
-sendTextMessage = function() {
-  const text = textInput.value.trim();
-  if (!text) return;
-
-  if (text.startsWith('!speak ')) {
-    const speakText = text.slice(7).trim();
-    textInput.value = '';
-    if (speakText) speakText(speakText);
-    return;
-  }
-
-  _origSend.call(this);
-};
 
 // ---------- Start ----------
 
