@@ -1,12 +1,15 @@
-"""Pi-Supertonic — голосовий місток між тобою і Supertonic TTS.
+"""Pi-Supertonic — голосовий місток.
 
-Режими:
-- chat: по черзі (кнопка 🎤 → STT → текст, я відповідаю → /api/speak)
-- realtime: VAD 3с + перебивання (аудіо → STT → текст → /api/speak)
+Архітектура:
+  Ти говориш → Pi-Supertonic (STT) → текст у чат
+  → я (Pi) відповідаю → /api/speak → TTS → 🔊
+
+Я — мозок. Pi-Supertonic — мої вуха і рот.
 """
 
 import json
 import base64
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -22,26 +25,25 @@ from server.tts.supertonic_client import synthesize, get_voices, get_languages
 async def lifespan(app: FastAPI):
     yield
 
-app = FastAPI(title="Pi-Supertonic", version="0.2.0", lifespan=lifespan)
+
+app = FastAPI(title="Pi-Supertonic", version="0.3.0", lifespan=lifespan)
 
 # ---------- REST API ----------
 
 @app.get("/api/config")
 async def get_config():
-    """Поточна конфігурація."""
     return {
         "tts_voice": settings.tts_voice,
         "tts_lang": settings.tts_lang,
         "tts_speed": settings.tts_speed,
         "tts_steps": settings.tts_steps,
         "tts_format": settings.tts_format,
-        "mode": "chat",
+        "groq_api_key": bool(settings.groq_api_key),
     }
 
 
 @app.post("/api/config")
 async def update_config(data: dict):
-    """Оновлює налаштування TTS."""
     for key, value in data.items():
         if hasattr(settings, key):
             setattr(settings, key, value)
@@ -61,47 +63,50 @@ async def languages():
 
 @app.post("/api/stt/groq")
 async def stt_groq_endpoint(data: dict):
-    """STT через Groq Whisper."""
+    """Розпізнати аудіо через Groq Whisper."""
     audio_b64 = data.get("audio", "")
-    sample_rate = data.get("sample_rate", 16000)
+    sr = data.get("sample_rate", 16000)
     if not audio_b64:
         raise HTTPException(400, "audio is required")
-    audio_bytes = base64.b64decode(audio_b64)
-    text = await transcribe_groq(audio_bytes, sample_rate)
+    text = await transcribe_groq(base64.b64decode(audio_b64), sr)
     return {"text": text}
 
 
 @app.post("/api/speak")
 async def speak_endpoint(data: dict):
-    """Отримує текст, синтезує через Supertonic, повертає аудіо.
-
-    Цей endpoint я (Pi) викликаю, щоб озвучити свою відповідь.
-    """
+    """Озвучити текст через TTS. Цей endpoint викликаю я (Pi)."""
     text = data.get("text", "").strip()
     if not text:
         raise HTTPException(400, "text is required")
 
-    try:
-        audio_bytes = await synthesize(
-            text=text,
-            voice=data.get("voice", settings.tts_voice),
-            lang=data.get("lang", settings.tts_lang),
-            speed=data.get("speed", settings.tts_speed),
-            steps=data.get("steps", settings.tts_steps),
-            fmt=data.get("format", settings.tts_format),
-        )
-    except Exception as e:
-        raise HTTPException(502, f"TTS error: {e}")
-
+    audio_bytes = await synthesize(
+        text=text,
+        voice=data.get("voice", settings.tts_voice),
+        lang=data.get("lang", settings.tts_lang),
+        speed=data.get("speed", settings.tts_speed),
+        steps=data.get("steps", settings.tts_steps),
+        fmt=data.get("format", settings.tts_format),
+    )
     return JSONResponse({
         "audio": base64.b64encode(audio_bytes).decode(),
         "format": settings.tts_format,
+        "text": text,
     })
 
 
-@app.post("/api/reset")
-async def reset_conversation():
-    return {"ok": True}
+@app.get("/api/next-transcript")
+async def next_transcript():
+    """Повертає останню транскрипцію (якщо є нове повідомлення).
+
+    Я (Pi) можу викликати цей endpoint щоб отримати що сказав користувач.
+    """
+    # transcript_queue зберігається в пам'яті, наповнюється з WebSocket
+    if transcript_queue:
+        return {"text": transcript_queue.pop(0)}
+    return {"text": None}
+
+
+transcript_queue: list[str] = []
 
 
 # ---------- WebSocket (режим realtime) ----------
@@ -111,7 +116,7 @@ async def websocket_endpoint(ws: WebSocket):
     """WebSocket для realtime режиму.
 
     Браузер шле аудіо → сервер транскрибує → повертає текст.
-    Я (Pi) відповідаю через /api/speak.
+    Текст також потрапляє в transcript_queue, звідки я (Pi) його забираю.
     """
     await ws.accept()
 
@@ -124,22 +129,19 @@ async def websocket_endpoint(ws: WebSocket):
             if event == "ping":
                 await ws.send_json({"type": "pong"})
 
-            elif event == "config_update":
-                for key, value in msg.get("data", {}).items():
-                    if hasattr(settings, key):
-                        setattr(settings, key, value)
-                await ws.send_json({"type": "config_updated"})
-
             elif event == "audio_chunk":
                 audio_b64 = msg.get("audio", "")
-                sample_rate = msg.get("sample_rate", 16000)
+                sr = msg.get("sample_rate", 16000)
                 audio_bytes = base64.b64decode(audio_b64)
                 is_end = msg.get("end_of_phrase", False)
 
                 if is_end:
                     await ws.send_json({"type": "status", "message": "transcribing..."})
                     try:
-                        user_text = await transcribe_groq(audio_bytes, sample_rate)
+                        user_text = await transcribe_groq(audio_bytes, sr)
+                    except ValueError as e:
+                        await ws.send_json({"type": "error", "message": str(e)})
+                        continue
                     except Exception as e:
                         await ws.send_json({"type": "error", "message": f"STT error: {e}"})
                         continue
@@ -148,22 +150,28 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "status", "message": "no speech detected"})
                         continue
 
-                    # Повертаємо транскрипцію — я (Pi) побачу її і відповім
+                    # Повертаємо в браузер
                     await ws.send_json({
                         "type": "transcription",
                         "text": user_text,
-                        "message": "Питання розпізнано. Pi відповідає...",
+                        "in_chat": True,
                     })
 
-                    # Чекаємо відповіді від Pi через /api/speak
-                    # Поки що просто сигналізуємо що текст передано
-                    await ws.send_json({"type": "status", "message": "чекаю відповідь Pi..."})
+                    # Кладемо в чергу — я (Pi) підберу через /api/next-transcript
+                    transcript_queue.append(user_text)
+
+                    await ws.send_json({
+                        "type": "status",
+                        "message": "Текст передано Pi. Чекаю відповідь...",
+                    })
                 else:
                     await ws.send_json({"type": "audio_chunk_ack"})
 
             elif event == "interrupt":
-                await ws.send_json({"type": "interrupt_ack",
-                                     "message": "Чекаю нове питання..."})
+                await ws.send_json({
+                    "type": "interrupt_ack",
+                    "message": "Чекаю...",
+                })
 
     except WebSocketDisconnect:
         pass
@@ -174,7 +182,7 @@ async def websocket_endpoint(ws: WebSocket):
             pass
 
 
-# ---------- статика ----------
+# ---------- Статика ----------
 
 app.mount("/", StaticFiles(directory="client", html=True), name="client")
 

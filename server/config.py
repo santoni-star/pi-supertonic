@@ -1,4 +1,4 @@
-"""Pi-Supertonic — конфігурація (тільки TTS + сервер)."""
+"""Pi-Supertonic — конфігурація."""
 
 import json
 from pathlib import Path
@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def save(self):
-        """Зберігає налаштування в config.json."""
         data = {
             "tts_api_url": self.tts_api_url,
             "tts_voice": self.tts_voice,
@@ -45,7 +44,6 @@ class Settings(BaseSettings):
         CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def load_json(self):
-        """Довантажує значення з config.json (поверх .env)."""
         if not CONFIG_FILE.exists():
             return
         try:
@@ -61,7 +59,7 @@ class Settings(BaseSettings):
                     setattr(self, key, value)
             print(f"[config] loaded from {CONFIG_FILE}")
         except (json.JSONDecodeError, Exception) as e:
-            print(f"[config] error loading {CONFIG_FILE}: {e}")
+            print(f"[config] error: {e}")
 
 
 settings = Settings()

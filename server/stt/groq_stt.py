@@ -1,13 +1,17 @@
 """STT через Groq Whisper API (хмарне розпізнавання мови)."""
 
-import base64
 import httpx
-
 from server.config import settings
 
 
 async def transcribe_groq(audio_data: bytes, sample_rate: int = 16000) -> str:
     """Надсилає аудіо в Groq Whisper API і повертає розпізнаний текст."""
+    if not settings.groq_api_key:
+        raise ValueError(
+            "GROQ_API_KEY не налаштовано. Додай ключ у ⚙️ налаштуваннях, "
+            "або використай Google STT (Chrome)."
+        )
+
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
 
