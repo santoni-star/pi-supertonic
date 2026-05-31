@@ -342,6 +342,15 @@ async function switchMode(mode) {
 }
 
 function connectRealtime() {
+  // Google STT — не потребує WebSocket, працює прямо в браузері
+  if (state.sttProvider === 'google') {
+    voiceStatus.textContent = '🎤 Слухаю (Google STT)...';
+    startRealtimeMic();
+    setupInterruptDetector();
+    return;
+  }
+
+  // Groq STT — через WebSocket (аудіо на сервер)
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${location.host}/ws`;
 
@@ -360,7 +369,6 @@ function connectRealtime() {
       case 'transcription':
         addMessage(`🎤 ${msg.text}`, 'user');
         voiceStatus.textContent = '📝 Розпізнано! Чекаю відповіді Pi...';
-        addMessage('💡 Питання передано Pi. Скоро відповім!', 'system');
         break;
 
       case 'status':
@@ -378,10 +386,6 @@ function connectRealtime() {
         break;
 
       case 'audio_chunk_ack':
-        break;
-
-      case 'config_updated':
-        addMessage('✅ Налаштування оновлено', 'system');
         break;
     }
   };
@@ -406,10 +410,18 @@ function disconnectRealtime() {
   stopInterruptDetector();
 }
 
-// Real-time: мікрофон + VAD
+// Real-time: мікрофон + VAD + STT
 async function startRealtimeMic() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // Якщо Google STT — використовуємо Web Speech API в браузері (без сервера)
+    if (state.sttProvider === 'google') {
+      startRealtimeGoogleStt();
+      return;
+    }
+
+    // Groq STT — VAD + відправка аудіо на сервер
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     state.audioContext = audioCtx;
     const source = audioCtx.createMediaStreamSource(stream);
@@ -420,7 +432,7 @@ async function startRealtimeMic() {
     let isPhraseActive = false;
     const SILENCE_THRESHOLD = 0.02;
     const SILENCE_TIMEOUT_MS = 3000;
-    const MIN_SAMPLES = audioCtx.sampleRate; // ~1 сек мінімум
+    const MIN_SAMPLES = audioCtx.sampleRate;
 
     source.connect(processor);
     processor.connect(audioCtx.destination);
@@ -461,7 +473,7 @@ async function startRealtimeMic() {
     state.mediaStream = stream;
     state.isRecording = true;
 
-    addMessage('🎤 Режим реального часу активний. Кажи — після 3с тиші я почую.', 'system');
+    addMessage('🎤 Режим реального часу активний (Groq STT). Кажи — після 3с тиші я почую.', 'system');
 
   } catch (err) {
     addMessage(`❌ Мікрофон: ${err.message}`, 'system');
@@ -471,6 +483,14 @@ async function startRealtimeMic() {
 
 function stopRealtimeMic() {
   state.isRecording = false;
+
+  // Зупиняємо Google STT якщо активний
+  if (state.chatRecognition && state.sttProvider === 'google') {
+    try { state.chatRecognition.stop(); } catch (e) {}
+    state.chatRecognition = null;
+  }
+
+  // Зупиняємо VAD (Groq STT)
   if (state.vadProcessor) {
     state.vadProcessor.disconnect();
     state.vadProcessor = null;
@@ -482,6 +502,85 @@ function stopRealtimeMic() {
   if (state.mediaStream) {
     state.mediaStream.getTracks().forEach(t => t.stop());
     state.mediaStream = null;
+  }
+}
+
+// Real-time з Google STT (браузерне розпізнавання, без сервера)
+function startRealtimeGoogleStt() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    addMessage('❌ Google STT не підтримується в цьому браузері.', 'system');
+    return;
+  }
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recognition = new SpeechRecognition();
+  state.chatRecognition = recognition;
+
+  recognition.lang = state.lang === 'uk' ? 'uk-UA'
+    : state.lang === 'ru' ? 'ru-RU'
+    : state.lang === 'de' ? 'de-DE'
+    : state.lang === 'fr' ? 'fr-FR'
+    : state.lang === 'ja' ? 'ja-JP'
+    : state.lang === 'ko' ? 'ko-KR'
+    : 'en-US';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  let finalTranscript = '';
+  let silenceTimer = null;
+  const SILENCE_MS = 2000;
+
+  recognition.onresult = (event) => {
+    let interim = '';
+    let final = '';
+
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        final += transcript;
+      } else {
+        interim += transcript;
+      }
+    }
+
+    if (final) {
+      finalTranscript += final;
+      voiceStatus.textContent = `🎙 ${final}`;
+
+      // Скидаємо таймер тиші
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        if (finalTranscript.trim()) {
+          addMessage(`🎤 ${finalTranscript.trim()}`, 'user');
+          voiceStatus.textContent = '📝 Розпізнано! Очікую Pi...';
+          finalTranscript = '';
+        }
+      }, SILENCE_MS);
+    } else if (interim) {
+      voiceStatus.textContent = `🎙 ${interim}`;
+    }
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      addMessage(`❌ Google STT помилка: ${event.error}`, 'system');
+    }
+  };
+
+  recognition.onend = () => {
+    // Автоматично перезапускаємо (continuous іноді падає)
+    if (state.mode === 'realtime' && state.sttProvider === 'google') {
+      try { recognition.start(); } catch (e) {}
+    }
+  };
+
+  try {
+    recognition.start();
+    state.isRecording = true;
+    voiceStatus.textContent = '🎤 Слухаю (Google STT)...';
+    addMessage('🎤 Режим реального часу активний (Google STT). Кажи — після 2с паузи текст з\'явиться.', 'system');
+  } catch (err) {
+    addMessage(`❌ Google STT: ${err.message}`, 'system');
   }
 }
 
