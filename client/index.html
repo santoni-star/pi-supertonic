@@ -56,19 +56,25 @@
     </div>
     <div class="modal-body">
       <div class="setting-group">
-        <h3>🤖 LLM (мозок)</h3>
-        <label>Провайдер
-          <select id="selLLM">
-            <option value="groq">Groq API (хмара, швидко)</option>
-            <option value="openai">OpenAI API</option>
-            <option value="ollama">Ollama (локально)</option>
-          </select>
+        <h3>🧠 Мозок: Pi</h3>
+        <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:14px;">
+          Я (Pi) — твій голосовий асистент. Ти говориш → я чую → я відповідаю → мій голос звучить через Supertonic.
+        </p>
+      </div>
+      <div class="setting-group">
+        <h3>🎤 STT (розпізнавання мови)</h3>
+        <label>
+          <input type="radio" name="stt" value="google" checked />
+          Google STT (Chrome, без ключа)<br>
+          <small style="color:var(--text-dim)">Працює тільки в Chrome/Edge</small>
+        </label>
+        <label>
+          <input type="radio" name="stt" value="groq" />
+          Groq Whisper (хмара)<br>
+          <small style="color:var(--text-dim)">Потрібен Groq API ключ нижче</small>
         </label>
         <label>Groq API Key
           <input type="password" id="groqKey" placeholder="gsk_..." />
-        </label>
-        <label>OpenAI API Key
-          <input type="password" id="openaiKey" placeholder="sk-..." />
         </label>
       </div>
       <div class="setting-group">

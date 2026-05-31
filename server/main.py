@@ -1,57 +1,28 @@
-"""Pi-Supertonic — головний сервер.
+"""Pi-Supertonic — голосовий місток між тобою і Supertonic TTS.
 
 Режими:
-- chat: по черзі (текст → LLM → TTS)
-- realtime: VAD 3с + перебивання (аудіо → STT → LLM → TTS → аудіо)
+- chat: по черзі (кнопка 🎤 → STT → текст, я відповідаю → /api/speak)
+- realtime: VAD 3с + перебивання (аудіо → STT → текст → /api/speak)
 """
 
-import asyncio
 import json
 import base64
-import uuid
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import settings
-from server.llm.factory import get_llm_provider
 from server.stt.groq_stt import transcribe_groq
 from server.tts.supertonic_client import synthesize, get_voices, get_languages
-
-# ---------- стан ----------
-
-_llm = None
-conversation_history: list[dict] = []
-
-
-def get_llm():
-    global _llm
-    if _llm is None:
-        _llm = get_llm_provider()
-    return _llm
-
-
-def reset_llm():
-    global _llm
-    _llm = None
-system_prompt = (
-    "Ти — Pi-Supertonic, голосовий асистент. Відповідай природно, "
-    "розмовною українською мовою. Відповіді мають бути короткими "
-    "(2-4 речення), бо це голосовий діалог. Не використовуй markdown, "
-    "зірочок, списків — тільки чистий текст."
-)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup
     yield
-    # shutdown
 
-app = FastAPI(title="Pi-Supertonic", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Pi-Supertonic", version="0.2.0", lifespan=lifespan)
 
 # ---------- REST API ----------
 
@@ -59,11 +30,6 @@ app = FastAPI(title="Pi-Supertonic", version="0.1.0", lifespan=lifespan)
 async def get_config():
     """Поточна конфігурація."""
     return {
-        "llm_provider": settings.llm_provider,
-        "groq_api_key": settings.groq_api_key,
-        "openai_api_key": settings.openai_api_key,
-        "openai_model": settings.openai_model,
-        "ollama_model": settings.ollama_model,
         "tts_voice": settings.tts_voice,
         "tts_lang": settings.tts_lang,
         "tts_speed": settings.tts_speed,
@@ -75,30 +41,27 @@ async def get_config():
 
 @app.post("/api/config")
 async def update_config(data: dict):
-    """Оновлює налаштування (в цій сесії)."""
-    llm_changed = False
+    """Оновлює налаштування TTS."""
     for key, value in data.items():
         if hasattr(settings, key):
-            old = getattr(settings, key)
             setattr(settings, key, value)
-            if key in ("llm_provider", "groq_api_key", "openai_api_key"):
-                llm_changed = True
-    if llm_changed:
-        reset_llm()  # перестворимо провайдер при наступному запиті
     settings.save()
     return {"ok": True}
 
 
 @app.get("/api/voices")
 async def voices():
-    voices_list = await get_voices()
-    return voices_list
+    return await get_voices()
+
+
+@app.get("/api/languages")
+async def languages():
+    return await get_languages()
 
 
 @app.post("/api/stt/groq")
 async def stt_groq_endpoint(data: dict):
-    """STT через Groq Whisper (з raw аудіо)."""
-    import base64
+    """STT через Groq Whisper."""
     audio_b64 = data.get("audio", "")
     sample_rate = data.get("sample_rate", 16000)
     if not audio_b64:
@@ -108,37 +71,19 @@ async def stt_groq_endpoint(data: dict):
     return {"text": text}
 
 
-@app.get("/api/languages")
-async def languages():
-    return await get_languages()
+@app.post("/api/speak")
+async def speak_endpoint(data: dict):
+    """Отримує текст, синтезує через Supertonic, повертає аудіо.
 
-
-@app.post("/api/chat")
-async def chat_endpoint(data: dict):
-    """Режим чату: отримує текст, повертає аудіо (MP3/WAV)."""
-    user_text = data.get("text", "").strip()
-    if not user_text:
+    Цей endpoint я (Pi) викликаю, щоб озвучити свою відповідь.
+    """
+    text = data.get("text", "").strip()
+    if not text:
         raise HTTPException(400, "text is required")
 
-    conversation_history.append({"role": "user", "content": user_text})
-
-    # LLM
-    llm = get_llm()
-    try:
-        response_text = await llm.chat_sync(conversation_history, system_prompt)
-    except ValueError as e:
-        conversation_history.pop()
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        conversation_history.pop()
-        raise HTTPException(502, f"LLM error: {e}")
-
-    conversation_history.append({"role": "assistant", "content": response_text})
-
-    # TTS
     try:
         audio_bytes = await synthesize(
-            text=response_text,
+            text=text,
             voice=data.get("voice", settings.tts_voice),
             lang=data.get("lang", settings.tts_lang),
             speed=data.get("speed", settings.tts_speed),
@@ -146,46 +91,16 @@ async def chat_endpoint(data: dict):
             fmt=data.get("format", settings.tts_format),
         )
     except Exception as e:
-        # TTS error but LLM worked — повертаємо хоча б текст
-        return JSONResponse({
-            "response_text": response_text,
-            "audio": None,
-            "format": settings.tts_format,
-            "error": f"TTS error: {e}",
-        })
+        raise HTTPException(502, f"TTS error: {e}")
 
     return JSONResponse({
-        "response_text": response_text,
         "audio": base64.b64encode(audio_bytes).decode(),
         "format": settings.tts_format,
     })
 
 
-@app.post("/api/chat/text")
-async def chat_text_endpoint(data: dict):
-    """Тільки текст (без TTS) — для відладки."""
-    user_text = data.get("text", "").strip()
-    if not user_text:
-        raise HTTPException(400, "text is required")
-
-    conversation_history.append({"role": "user", "content": user_text})
-    llm = get_llm()
-    try:
-        response_text = await llm.chat_sync(conversation_history, system_prompt)
-    except ValueError as e:
-        conversation_history.pop()
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        conversation_history.pop()
-        raise HTTPException(502, f"LLM error: {e}")
-
-    conversation_history.append({"role": "assistant", "content": response_text})
-    return {"response_text": response_text}
-
-
 @app.post("/api/reset")
 async def reset_conversation():
-    conversation_history.clear()
     return {"ok": True}
 
 
@@ -193,8 +108,12 @@ async def reset_conversation():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    """WebSocket для realtime режиму.
+
+    Браузер шле аудіо → сервер транскрибує → повертає текст.
+    Я (Pi) відповідаю через /api/speak.
+    """
     await ws.accept()
-    local_history: list[dict] = []
 
     try:
         while True:
@@ -211,21 +130,13 @@ async def websocket_endpoint(ws: WebSocket):
                         setattr(settings, key, value)
                 await ws.send_json({"type": "config_updated"})
 
-            elif event == "reset":
-                local_history.clear()
-                await ws.send_json({"type": "reset_ok"})
-
             elif event == "audio_chunk":
-                # Аудіо-фрагмент від браузера (base64)
                 audio_b64 = msg.get("audio", "")
                 sample_rate = msg.get("sample_rate", 16000)
                 audio_bytes = base64.b64decode(audio_b64)
-
-                # Перевірка: чи це кінець фрази (тиша)?
                 is_end = msg.get("end_of_phrase", False)
 
                 if is_end:
-                    # Транскрибуємо аудіо
                     await ws.send_json({"type": "status", "message": "transcribing..."})
                     try:
                         user_text = await transcribe_groq(audio_bytes, sample_rate)
@@ -237,45 +148,22 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "status", "message": "no speech detected"})
                         continue
 
-                    await ws.send_json({"type": "transcription", "text": user_text})
-                    local_history.append({"role": "user", "content": user_text})
+                    # Повертаємо транскрипцію — я (Pi) побачу її і відповім
+                    await ws.send_json({
+                        "type": "transcription",
+                        "text": user_text,
+                        "message": "Питання розпізнано. Pi відповідає...",
+                    })
 
-                    # LLM
-                    await ws.send_json({"type": "status", "message": "thinking..."})
-                    llm = get_llm()
-                    full_response = ""
-                    try:
-                        async for chunk in llm.chat(local_history, system_prompt, stream=True):
-                            full_response += chunk
-                            await ws.send_json({"type": "llm_chunk", "text": chunk})
-                    except Exception as e:
-                        await ws.send_json({"type": "error", "message": f"LLM error: {e}"})
-                        continue
-
-                    local_history.append({"role": "assistant", "content": full_response})
-
-                    # TTS
-                    await ws.send_json({"type": "status", "message": "synthesizing..."})
-                    try:
-                        audio_bytes_tts = await synthesize(
-                            text=full_response,
-                            fmt=settings.tts_format,
-                        )
-                        await ws.send_json({
-                            "type": "audio",
-                            "audio": base64.b64encode(audio_bytes_tts).decode(),
-                            "format": settings.tts_format,
-                            "text": full_response,
-                        })
-                    except Exception as e:
-                        await ws.send_json({"type": "error", "message": f"TTS error: {e}"})
+                    # Чекаємо відповіді від Pi через /api/speak
+                    # Поки що просто сигналізуємо що текст передано
+                    await ws.send_json({"type": "status", "message": "чекаю відповідь Pi..."})
                 else:
-                    # Проміжний chunk — просто підтверджуємо
                     await ws.send_json({"type": "audio_chunk_ack"})
 
             elif event == "interrupt":
-                # Користувач перебив — зупиняємо TTS
-                await ws.send_json({"type": "interrupt_ack"})
+                await ws.send_json({"type": "interrupt_ack",
+                                     "message": "Чекаю нове питання..."})
 
     except WebSocketDisconnect:
         pass
@@ -290,8 +178,6 @@ async def websocket_endpoint(ws: WebSocket):
 
 app.mount("/", StaticFiles(directory="client", html=True), name="client")
 
-
-# ---------- точка входу ----------
 
 def run():
     import uvicorn

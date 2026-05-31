@@ -1,11 +1,11 @@
 /* ===== Pi-Supertonic — фронтенд ===== */
+/* Мозок — Pi (я). Сервер — тільки STT + TTS місток.        */
 
 // ---------- стан ----------
 
 const state = {
   mode: 'chat',           // chat | realtime
-  sttProvider: 'google',  // google | groq
-  llmProvider: 'groq',
+  sttProvider: 'google',
   voice: 'F1',
   lang: 'uk',
   speed: 1.05,
@@ -16,21 +16,22 @@ const state = {
   ws: null,
   isRecording: false,
   isPlaying: false,
-  mediaRecorder: null,
   audioContext: null,
-  audioChunks: [],
-  silenceTimer: null,
+  vadProcessor: null,
+  mediaStream: null,
   isSpeaking: false,
-  vadEnabled: false,
+  interruptProcessor: null,
+  interruptStream: null,
+  interruptAudioCtx: null,
 
   // chat voice
   chatRecognition: null,
+  mediaRecorder: null,
 };
 
 // ---------- DOM refs ----------
 
 const $ = (s) => document.querySelector(s);
-const $$ = (s) => document.querySelectorAll(s);
 
 const messagesEl = $('#messages');
 const textInput = $('#textInput');
@@ -58,7 +59,6 @@ async function init() {
     console.warn('Could not load config, using defaults');
   }
 
-  // Налаштовуємо UI
   updateSettingsUI();
 
   // Event listeners
@@ -75,18 +75,15 @@ async function init() {
   closeSettings.addEventListener('click', () => settingsModal.classList.add('hidden'));
   saveSettings.addEventListener('click', saveSettingsHandler);
 
-  // Mode buttons
   modeChat.addEventListener('click', () => switchMode('chat'));
   modeRealtime.addEventListener('click', () => switchMode('realtime'));
 
   btnReset.addEventListener('click', resetConversation);
 
-  // Settings modal — close on overlay click
   settingsModal.addEventListener('click', (e) => {
     if (e.target === settingsModal) settingsModal.classList.add('hidden');
   });
 
-  // Range inputs
   $('#selSpeed').addEventListener('input', () => {
     $('#speedLabel').textContent = $('#selSpeed').value;
   });
@@ -94,10 +91,10 @@ async function init() {
     $('#stepsLabel').textContent = $('#selSteps').value;
   });
 
-  console.log('Pi-Supertonic initialized');
+  console.log('Pi-Supertonic initialized — мозок: Pi');
 }
 
-// ---------- Chat mode: текст ----------
+// ---------- Chat mode: текст → TTS ----------
 
 async function sendTextMessage() {
   const text = textInput.value.trim();
@@ -108,15 +105,34 @@ async function sendTextMessage() {
   textInput.disabled = true;
   btnSend.disabled = true;
 
-  // Показуємо "думає"
-  const thinkingId = addMessage('...', 'assistant', true);
+  // STT повідомлення просто показуємо в чаті.
+  // Я (Pi) відповідаю тут, у цьому самому чаті.
+  // Для озвучення використовуй:  !speak <текст>
+  // Або скопіюй мою відповідь і натисни "Speak" в інтерфейсі.
+
+  // Показуємо підказку
+  const hintId = addMessage(
+    '💡 Текст отримано. Я (Pi) бачу його і відповідаю тут. ' +
+    'Скопіюй мою відповідь і натисни 🎤 "Speak", або використай !speak',
+    'system'
+  );
+
+  textInput.disabled = false;
+  btnSend.disabled = false;
+  textInput.focus();
+}
+
+// ---------- Speak: озвучити текст через TTS ----------
+
+async function speakText(text, showInChat = true) {
+  if (!text || !text.trim()) return;
 
   try {
-    const resp = await fetch('/api/chat', {
+    const resp = await fetch('/api/speak', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text,
+        text: text.trim(),
         voice: state.voice,
         lang: state.lang,
         speed: state.speed,
@@ -125,37 +141,23 @@ async function sendTextMessage() {
       }),
     });
 
-    const data = await resp.json();
-
-    // Видаляємо "думає"
-    removeMessage(thinkingId);
-
     if (!resp.ok) {
-      addMessage(`❌ ${data.detail || data.error || 'Помилка сервера'}`, 'system');
+      const err = await resp.json().catch(() => ({ detail: 'HTTP ' + resp.status }));
+      addMessage(`❌ TTS помилка: ${err.detail || 'невідома'}`, 'system');
       return;
     }
 
-    // Додаємо відповідь
-    const msgId = addMessage(data.response_text, 'assistant');
-
-    // Програємо аудіо (якщо є)
+    const data = await resp.json();
     if (data.audio) {
+      const msgId = showInChat ? addMessage(`🔊 ${text.trim()}`, 'assistant') : null;
       playAudio(data.audio, data.format, msgId);
     }
-    if (data.error) {
-      console.warn('TTS note:', data.error);
-    }
   } catch (err) {
-    removeMessage(thinkingId);
     addMessage(`❌ Помилка: ${err.message}`, 'system');
-  } finally {
-    textInput.disabled = false;
-    btnSend.disabled = false;
-    textInput.focus();
   }
 }
 
-// ---------- Chat mode: голос (Google STT) ----------
+// ---------- Chat mode: voice input (Google STT / Groq STT) ----------
 
 function toggleVoiceInput() {
   if (state.isRecording) {
@@ -166,14 +168,13 @@ function toggleVoiceInput() {
   if (state.sttProvider === 'google') {
     startGoogleSTT();
   } else {
-    // Groq STT в чат-режимі — записуємо, потім транскрибуємо
     startGroqVoiceInput();
   }
 }
 
 function startGoogleSTT() {
   if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    addMessage('❌ Google STT не підтримується в цьому браузері. Використай Groq STT або текст.', 'system');
+    addMessage('❌ Google STT не підтримується в цьому браузері. Використай Groq STT.', 'system');
     return;
   }
 
@@ -181,7 +182,13 @@ function startGoogleSTT() {
   const recognition = new SpeechRecognition();
   state.chatRecognition = recognition;
 
-  recognition.lang = state.lang === 'uk' ? 'uk-UA' : state.lang === 'ru' ? 'ru-RU' : 'en-US';
+  recognition.lang = state.lang === 'uk' ? 'uk-UA'
+    : state.lang === 'ru' ? 'ru-RU'
+    : state.lang === 'de' ? 'de-DE'
+    : state.lang === 'fr' ? 'fr-FR'
+    : state.lang === 'ja' ? 'ja-JP'
+    : state.lang === 'ko' ? 'ko-KR'
+    : 'en-US';
   recognition.continuous = false;
   recognition.interimResults = false;
 
@@ -193,13 +200,18 @@ function startGoogleSTT() {
 
   recognition.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
-    textInput.value = transcript;
+    addMessage(`🎤 ${transcript}`, 'user');
     stopVoiceInput();
-    sendTextMessage();
+
+    // Підказка: скопіювати і відправити Pi
+    addMessage(
+      '💡 Я чую: "' + transcript + '". Напиши мені це в наш чат, і я відповім!',
+      'system'
+    );
   };
 
   recognition.onerror = (event) => {
-    addMessage(`❌ Помилка STT: ${event.error}`, 'system');
+    addMessage(`❌ STT помилка: ${event.error}`, 'system');
     stopVoiceInput();
   };
 
@@ -224,7 +236,6 @@ function stopVoiceInput() {
   }
 }
 
-// Groq STT в чат-режимі — запис, потім відправка на сервер
 async function startGroqVoiceInput() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -240,7 +251,7 @@ async function startGroqVoiceInput() {
       const blob = new Blob(chunks, { type: 'audio/webm' });
       stream.getTracks().forEach(t => t.stop());
 
-      addMessage('🎤 Розпізнаю...', 'system');
+      addMessage('🎤 Розпізнаю через Groq...', 'system');
       try {
         const audioBase64 = await blobToBase64(blob);
         const resp = await fetch('/api/stt/groq', {
@@ -251,8 +262,8 @@ async function startGroqVoiceInput() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (data.text) {
-          textInput.value = data.text;
-          sendTextMessage();
+          addMessage(`🎤 ${data.text}`, 'user');
+          addMessage('💡 Я чую: "' + data.text + '". Напиши мені це в наш чат!', 'system');
         }
       } catch (err) {
         addMessage(`❌ STT помилка: ${err.message}`, 'system');
@@ -264,14 +275,13 @@ async function startGroqVoiceInput() {
     btnVoice.textContent = '⏹';
     mediaRecorder.start();
 
-    // Автостоп через 10 секунд
     setTimeout(() => {
       if (state.isRecording && mediaRecorder.state !== 'inactive') {
         mediaRecorder.stop();
       }
     }, 10000);
   } catch (err) {
-    addMessage(`❌ Помилка мікрофона: ${err.message}`, 'system');
+    addMessage(`❌ Мікрофон: ${err.message}`, 'system');
   }
 }
 
@@ -280,22 +290,22 @@ async function startGroqVoiceInput() {
 async function switchMode(mode) {
   if (state.mode === mode) return;
 
-  // Вимикаємо старий режим
   if (state.mode === 'realtime') {
     disconnectRealtime();
   }
 
   state.mode = mode;
 
-  // UI
   modeChat.classList.toggle('active', mode === 'chat');
   modeRealtime.classList.toggle('active', mode === 'realtime');
-
   document.querySelector('.input-area').style.display = mode === 'chat' ? 'flex' : 'none';
-  voiceIndicator.classList.add('hidden');
 
   if (mode === 'realtime') {
+    voiceIndicator.classList.remove('hidden');
+    voiceStatus.textContent = '🎤 З\'єднуюсь...';
     connectRealtime();
+  } else {
+    voiceIndicator.classList.add('hidden');
   }
 }
 
@@ -306,9 +316,9 @@ function connectRealtime() {
   state.ws = new WebSocket(wsUrl);
 
   state.ws.onopen = () => {
-    voiceIndicator.classList.remove('hidden');
-    voiceStatus.textContent = '🔌 З\'єднано. Говори...';
+    voiceStatus.textContent = '🎤 Слухаю...';
     startRealtimeMic();
+    setupInterruptDetector();
   };
 
   state.ws.onmessage = (event) => {
@@ -316,22 +326,9 @@ function connectRealtime() {
 
     switch (msg.type) {
       case 'transcription':
-        addMessage(msg.text, 'user');
-        break;
-
-      case 'llm_chunk':
-        // Оновлюємо останнє повідомлення асистента (streaming)
-        updateLastAssistant(msg.text);
-        break;
-
-      case 'audio':
-        // Фінальне аудіо
-        const finalText = msg.text;
-        // Замінюємо останнє повідомлення фінальним текстом
-        updateLastAssistant(finalText, false);
-        playAudio(msg.audio, msg.format);
-        voiceStatus.textContent = '🎧 Відтворюю...';
-        state.isSpeaking = true;
+        addMessage(`🎤 ${msg.text}`, 'user');
+        voiceStatus.textContent = '📝 Розпізнано! Чекаю відповіді Pi...';
+        addMessage('💡 Питання передано Pi. Скоро відповім!', 'system');
         break;
 
       case 'status':
@@ -344,7 +341,7 @@ function connectRealtime() {
         break;
 
       case 'interrupt_ack':
-        voiceStatus.textContent = '🛑 Перебив. Слухаю...';
+        voiceStatus.textContent = '🛑 Перебив. Слухаю знову...';
         state.isSpeaking = false;
         break;
 
@@ -359,11 +356,11 @@ function connectRealtime() {
 
   state.ws.onclose = () => {
     voiceIndicator.classList.add('hidden');
+    addMessage('🔌 WebSocket закрито', 'system');
     state.ws = null;
-    addMessage('🔌 З\'єднання закрито', 'system');
   };
 
-  state.ws.onerror = (err) => {
+  state.ws.onerror = () => {
     addMessage('❌ WebSocket помилка', 'system');
   };
 }
@@ -374,64 +371,52 @@ function disconnectRealtime() {
     state.ws = null;
   }
   stopRealtimeMic();
+  stopInterruptDetector();
 }
 
 // Real-time: мікрофон + VAD
 async function startRealtimeMic() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    // Audio context для VAD + запис
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     state.audioContext = audioCtx;
-
     const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(4096, 1, 1); // 4096 samples ~ 256ms at 16kHz
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
     let audioBuffer = [];
     let silenceStart = null;
     let isPhraseActive = false;
-    const SILENCE_THRESHOLD = 0.02;  // RMS поріг тиші
-    const SILENCE_TIMEOUT_MS = 3000; // 3 секунди тиші
-    const MIN_PHRASE_MS = 500;       // мінімальна довжина фрази
+    const SILENCE_THRESHOLD = 0.02;
+    const SILENCE_TIMEOUT_MS = 3000;
+    const MIN_SAMPLES = audioCtx.sampleRate; // ~1 сек мінімум
 
     source.connect(processor);
     processor.connect(audioCtx.destination);
 
     processor.onaudioprocess = (event) => {
-      if (state.isSpeaking) return; // Не слухаємо, поки говоримо
+      if (state.isSpeaking) return;
 
       const input = event.inputBuffer.getChannelData(0);
-
-      // Обчислюємо RMS
       let sum = 0;
-      for (let i = 0; i < input.length; i++) {
-        sum += input[i] * input[i];
-      }
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
       const rms = Math.sqrt(sum / input.length);
 
-      // Додаємо в буфер (реземплюємо до 16kHz)
       audioBuffer.push(...input);
-
       const now = Date.now();
 
       if (rms > SILENCE_THRESHOLD) {
-        // Голос
         silenceStart = null;
         if (!isPhraseActive) {
           isPhraseActive = true;
           voiceStatus.textContent = '🎙 Чую...';
         }
       } else {
-        // Тиша
         if (isPhraseActive) {
           if (silenceStart === null) {
             silenceStart = now;
-          } else if (now - silenceStart >= SILENCE_TIMEOUT_MS) {
-            // 3 секунди тиші — відправляємо фразу
+          } else if (now - silenceStart >= SILENCE_TIMEOUT_MS && audioBuffer.length > MIN_SAMPLES) {
             isPhraseActive = false;
             silenceStart = null;
-
             const phraseBuffer = audioBuffer.splice(0, audioBuffer.length);
             sendAudioPhrase(phraseBuffer, audioCtx.sampleRate);
             voiceStatus.textContent = '⏳ Обробляю...';
@@ -444,8 +429,10 @@ async function startRealtimeMic() {
     state.mediaStream = stream;
     state.isRecording = true;
 
+    addMessage('🎤 Режим реального часу активний. Кажи — після 3с тиші я почую.', 'system');
+
   } catch (err) {
-    addMessage(`❌ Помилка мікрофона: ${err.message}`, 'system');
+    addMessage(`❌ Мікрофон: ${err.message}`, 'system');
     disconnectRealtime();
   }
 }
@@ -469,17 +456,14 @@ function stopRealtimeMic() {
 async function sendAudioPhrase(samples, sampleRate) {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
 
-  // Реземпл до 16kHz (Groq Whisper)
   const targetRate = 16000;
   const resampled = resampleAudio(samples, sampleRate, targetRate);
 
-  // Конвертуємо float32 → PCM16
   const pcm16 = new Int16Array(resampled.length);
   for (let i = 0; i < resampled.length; i++) {
     pcm16[i] = Math.max(-32768, Math.min(32767, resampled[i] * 32768));
   }
 
-  // Base64
   const audioB64 = arrayBufferToBase64(pcm16.buffer);
 
   state.ws.send(JSON.stringify({
@@ -517,7 +501,6 @@ function playAudio(audioBase64, format, msgId) {
 
   const audio = new Audio(url);
 
-  // Додаємо аудіо-елемент в повідомлення, якщо є msgId
   if (msgId) {
     const msgEl = document.getElementById(`msg-${msgId}`);
     if (msgEl) {
@@ -529,34 +512,21 @@ function playAudio(audioBase64, format, msgId) {
     }
   }
 
+  audio.onplay = () => { state.isPlaying = true; state.isSpeaking = true; };
+
   audio.onended = () => {
     state.isPlaying = false;
+    state.isSpeaking = false;
     if (state.mode === 'realtime') {
-      state.isSpeaking = false;
       voiceStatus.textContent = '🎤 Слухаю...';
     }
     URL.revokeObjectURL(url);
   };
 
-  audio.onplay = () => {
-    state.isPlaying = true;
-    state.isSpeaking = true;
-  };
-
-  // If realtime mode and we detect mic activity during playback → interrupt
-  if (state.mode === 'realtime') {
-    audio.onplay = () => {
-      state.isPlaying = true;
-      state.isSpeaking = true;
-    };
-
-    // We check for interrupt via the VAD processor which checks state.isSpeaking
-  }
-
   currentAudio = audio;
   audio.play().catch(err => {
     console.warn('Audio play error:', err);
-    addMessage('❌ Помилка відтворення аудіо', 'system');
+    addMessage('❌ Помилка відтворення', 'system');
   });
 }
 
@@ -574,7 +544,65 @@ function interruptPlayback() {
   }
 }
 
-// ---------- Допоміжні функції ----------
+// ---------- Interrupt detection ----------
+
+async function setupInterruptDetector() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+
+    let speechDetected = false;
+    const THRESHOLD = 0.03;
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    processor.onaudioprocess = (event) => {
+      if (state.mode !== 'realtime' || !state.isSpeaking) return;
+
+      const input = event.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
+
+      if (rms > THRESHOLD) {
+        if (!speechDetected) {
+          speechDetected = true;
+          interruptPlayback();
+          voiceStatus.textContent = '🛑 Перебив. Слухаю...';
+          state.isSpeaking = false;
+        }
+      } else {
+        speechDetected = false;
+      }
+    };
+
+    state.interruptProcessor = processor;
+    state.interruptStream = stream;
+    state.interruptAudioCtx = audioCtx;
+  } catch (err) {
+    console.warn('Interrupt detector:', err);
+  }
+}
+
+function stopInterruptDetector() {
+  if (state.interruptProcessor) {
+    state.interruptProcessor.disconnect();
+    state.interruptProcessor = null;
+  }
+  if (state.interruptAudioCtx) {
+    state.interruptAudioCtx.close();
+    state.interruptAudioCtx = null;
+  }
+  if (state.interruptStream) {
+    state.interruptStream.getTracks().forEach(t => t.stop());
+    state.interruptStream = null;
+  }
+}
+
+// ---------- Повідомлення ----------
 
 function addMessage(text, role, isTyping = false) {
   const id = Date.now() + Math.random().toString(36).slice(2, 6);
@@ -590,10 +618,7 @@ function addMessage(text, role, isTyping = false) {
 
 function updateLastAssistant(text, streaming = true) {
   const msgs = messagesEl.querySelectorAll('.message.assistant');
-  if (msgs.length === 0) {
-    addMessage(text, 'assistant');
-    return;
-  }
+  if (msgs.length === 0) { addMessage(text, 'assistant'); return; }
   const last = msgs[msgs.length - 1];
   const textEl = last.querySelector('.msg-text');
   if (textEl) {
@@ -601,7 +626,6 @@ function updateLastAssistant(text, streaming = true) {
     if (streaming) textEl.classList.add('typing-dots');
     else textEl.classList.remove('typing-dots');
   }
-  // Видаляємо старий аудіо-плеєр, якщо є
   const oldAudio = last.querySelector('.msg-audio');
   if (oldAudio) oldAudio.remove();
   scrollToBottom();
@@ -626,9 +650,6 @@ function escapeHtml(text) {
 // ---------- Settings ----------
 
 function updateSettingsUI() {
-  $('#selLLM').value = state.llmProvider || 'groq';
-  $('#groqKey').value = state.groq_api_key || '';
-  $('#openaiKey').value = state.openai_api_key || '';
   $('#selVoice').value = state.voice || 'F1';
   $('#selLang').value = state.lang || 'uk';
   $('#selSpeed').value = state.speed || 1.05;
@@ -636,15 +657,14 @@ function updateSettingsUI() {
   $('#selSteps').value = state.steps || 8;
   $('#stepsLabel').textContent = state.steps || 8;
   $('#selFormat').value = state.format || 'mp3';
+  $('#groqKey').value = state.groq_api_key || '';
 
-  // STT radio
   const sttRadio = document.querySelector(`input[name="stt"][value="${state.sttProvider}"]`);
   if (sttRadio) sttRadio.checked = true;
 }
 
 async function saveSettingsHandler() {
   const newConfig = {
-    llm_provider: $('#selLLM').value,
     tts_voice: $('#selVoice').value,
     tts_lang: $('#selLang').value,
     tts_speed: parseFloat($('#selSpeed').value),
@@ -653,31 +673,21 @@ async function saveSettingsHandler() {
   };
 
   const groqKey = $('#groqKey').value.trim();
-  const openaiKey = $('#openaiKey').value.trim();
-
   if (groqKey) newConfig.groq_api_key = groqKey;
-  if (openaiKey) newConfig.openai_api_key = openaiKey;
 
   const sttRadio = document.querySelector('input[name="stt"]:checked');
   state.sttProvider = sttRadio ? sttRadio.value : 'google';
-
   Object.assign(state, newConfig);
 
-  // Відправляємо на сервер
   try {
     const resp = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newConfig),
     });
-    if (resp.ok) {
-      // Якщо в realtime режимі, оновлюємо через WS
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(JSON.stringify({ type: 'config_update', data: newConfig }));
-      }
-    }
+    if (!resp.ok) console.warn('Config save failed');
   } catch (err) {
-    console.warn('Failed to save config:', err);
+    console.warn('Config save error:', err);
   }
 
   settingsModal.classList.add('hidden');
@@ -710,94 +720,33 @@ function blobToBase64(blob) {
 function arrayBufferToBase64(buffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
 
 function base64ToArrayBuffer(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
 
-// ---------- Interruption detection: перебивання в реальному часі ----------
-// Окремий аудіо-потік тільки для детекції перебивання
+// ---------- !speak команда ----------
+// Якщо ввести в текстове поле "!speak Привіт" — текст озвучиться
 
-async function setupInterruptDetector() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+const _origSend = sendTextMessage;
+sendTextMessage = function() {
+  const text = textInput.value.trim();
+  if (!text) return;
 
-    let speechDuringPlayback = false;
-    const INTERRUPT_THRESHOLD = 0.03;
-
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    processor.onaudioprocess = (event) => {
-      if (state.mode !== 'realtime' || !state.isSpeaking) return;
-
-      const input = event.inputBuffer.getChannelData(0);
-      let sum = 0;
-      for (let i = 0; i < input.length; i++) {
-        sum += input[i] * input[i];
-      }
-      const rms = Math.sqrt(sum / input.length);
-
-      if (rms > INTERRUPT_THRESHOLD) {
-        if (!speechDuringPlayback) {
-          speechDuringPlayback = true;
-          interruptPlayback();
-          voiceStatus.textContent = '🛑 Перебив. Слухаю...';
-          state.isSpeaking = false;
-        }
-      } else {
-        speechDuringPlayback = false;
-      }
-    };
-
-    state.interruptProcessor = processor;
-    state.interruptStream = stream;
-    state.interruptAudioCtx = audioCtx;
-  } catch (err) {
-    console.warn('Interrupt detector setup failed:', err);
+  if (text.startsWith('!speak ')) {
+    const speakText = text.slice(7).trim();
+    textInput.value = '';
+    if (speakText) speakText(speakText);
+    return;
   }
-}
 
-function stopInterruptDetector() {
-  if (state.interruptProcessor) {
-    state.interruptProcessor.disconnect();
-    state.interruptProcessor = null;
-  }
-  if (state.interruptAudioCtx) {
-    state.interruptAudioCtx.close();
-    state.interruptAudioCtx = null;
-  }
-  if (state.interruptStream) {
-    state.interruptStream.getTracks().forEach(t => t.stop());
-    state.interruptStream = null;
-  }
-}
-
-// Обгортаємо connectRealtime з interrupt детектором
-const _origConnectRealtime = connectRealtime;
-const _origDisconnectRealtime = disconnectRealtime;
-
-connectRealtime = function() {
-  _origConnectRealtime.call(this);
-  setupInterruptDetector();
-};
-
-disconnectRealtime = function() {
-  _origDisconnectRealtime.call(this);
-  stopInterruptDetector();
+  _origSend.call(this);
 };
 
 // ---------- Start ----------

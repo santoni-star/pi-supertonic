@@ -1,7 +1,6 @@
-"""Pi-Supertonic — конфігурація з JSON-персистентністю."""
+"""Pi-Supertonic — конфігурація (тільки TTS + сервер)."""
 
 import json
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -11,17 +10,6 @@ CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 
 
 class Settings(BaseSettings):
-    # LLM
-    llm_provider: Literal["groq", "openai", "ollama"] = "groq"
-    groq_api_key: str = ""
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1:8b"
-
-    # STT
-    groq_stt_model: str = "whisper-large-v3"
-
     # TTS (Supertonic server)
     tts_api_url: str = "http://127.0.0.1:8765"
     tts_voice: str = "F1"
@@ -34,18 +22,15 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8888
 
+    # STT
+    groq_api_key: str = ""
+    groq_stt_model: str = "whisper-large-v3"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def save(self):
-        """Зберігає поточні налаштування в config.json."""
+        """Зберігає налаштування в config.json."""
         data = {
-            "llm_provider": self.llm_provider,
-            "groq_api_key": self.groq_api_key,
-            "openai_api_key": self.openai_api_key,
-            "openai_model": self.openai_model,
-            "ollama_base_url": self.ollama_base_url,
-            "ollama_model": self.ollama_model,
-            "groq_stt_model": self.groq_stt_model,
             "tts_api_url": self.tts_api_url,
             "tts_voice": self.tts_voice,
             "tts_lang": self.tts_lang,
@@ -54,18 +39,19 @@ class Settings(BaseSettings):
             "tts_format": self.tts_format,
             "host": self.host,
             "port": self.port,
+            "groq_api_key": self.groq_api_key,
+            "groq_stt_model": self.groq_stt_model,
         }
         CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def load_json(self):
-        """Довантажує значення з config.json (перекривають .env)."""
+        """Довантажує значення з config.json (поверх .env)."""
         if not CONFIG_FILE.exists():
             return
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             for key, value in data.items():
                 if hasattr(self, key) and value is not None:
-                    # Приводимо до правильного типу
                     field_type = self.model_fields.get(key)
                     if field_type:
                         if field_type.annotation is float:
@@ -78,6 +64,5 @@ class Settings(BaseSettings):
             print(f"[config] error loading {CONFIG_FILE}: {e}")
 
 
-# Єдиний екземпляр (ініціалізується з .env, потім config.json)
 settings = Settings()
 settings.load_json()
