@@ -10,48 +10,57 @@ import sys
 import os
 import tempfile
 import subprocess
+import time
 import httpx
 import base64
 
 TTS_SERVER = "http://localhost:8888"
 
 
-def play_audio_sync(mp3_bytes: bytes):
-    """Відтворити MP3 на Windows без відкриття додаткових вікон.
+def play_mp3(mp3_bytes: bytes):
+    """Відтворити MP3 на Windows.
 
-    Конвертуємо у WAV через ffmpeg (pipe) і граємо через winsound.
+    Стратегія:
+    1. ffmpeg → WAV у тимчасовий файл
+    2. winsound (неблокуючий)
+    3. Файл видаляється після невеликої затримки
     """
-    import winsound
-    import wave
-    import io
-
-    # ffmpeg: mp3 (stdin) → wav (stdout)
-    proc = subprocess.run(
-        ["ffmpeg", "-i", "pipe:0", "-f", "wav", "pipe:1", "-y", "-loglevel", "quiet"],
-        input=mp3_bytes,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0 or len(proc.stdout) < 100:
-        # fallback: зберегти у файл і відкрити
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            f.write(mp3_bytes)
-            tmp = f.name
-        os.startfile(tmp)
-        return
-
-    # winsound грає WAV з пам'яті
+    # Конвертуємо MP3 → WAV у тимчасовий файл
+    tmp_wav = tempfile.mktemp(suffix=".wav")
     try:
-        winsound.PlaySound(proc.stdout, winsound.SND_MEMORY)
-    except Exception:
-        # fallback: записати у тимчасовий файл
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(proc.stdout)
-            tmp = f.name
+        proc = subprocess.run(
+            ["ffmpeg", "-i", "pipe:0", "-f", "wav",
+             "-acodec", "pcm_s16le", "-ac", "1", "-ar", "24000",
+             "-y", "-loglevel", "quiet", tmp_wav],
+            input=mp3_bytes,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0 or not os.path.exists(tmp_wav) or os.path.getsize(tmp_wav) < 1000:
+            print(f"❌ ffmpeg не зміг конвертувати", file=sys.stderr)
+            # fallback: просто зберегти mp3 і відкрити
+            tmp_mp3 = tempfile.mktemp(suffix=".mp3")
+            with open(tmp_mp3, "wb") as f:
+                f.write(mp3_bytes)
+            os.startfile(tmp_mp3)
+            return
+
+        import winsound
+        # Граємо асинхронно — не блокуємо
+        winsound.PlaySound(tmp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        print(f"🔊 {os.path.getsize(tmp_wav)} bytes WAV", file=sys.stderr)
+
+        # Чекаємо трохи (щоб файл не видалився до завершення відтворення)
+        # Тривалість приблизно: bytes / (24000 * 2) секунд
+        duration_sec = os.path.getsize(tmp_wav) / (24000 * 2)
+        time.sleep(min(duration_sec + 0.5, 30))
+
+    finally:
         try:
-            winsound.PlaySound(tmp, winsound.SND_FILENAME)
-        finally:
-            os.unlink(tmp)
+            if os.path.exists(tmp_wav):
+                os.unlink(tmp_wav)
+        except Exception:
+            pass
 
 
 def speak(text: str) -> bool:
@@ -79,21 +88,13 @@ def speak(text: str) -> bool:
         fmt = data.get("format", "mp3")
 
         print(f"🔊 {len(audio_bytes)} bytes ({fmt})", file=sys.stderr)
+        play_mp3(audio_bytes)
 
-        if fmt == "wav":
-            import winsound
-            try:
-                winsound.PlaySound(audio_bytes, winsound.SND_MEMORY)
-            except Exception:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    f.write(audio_bytes)
-                    tmp = f.name
-                try:
-                    winsound.PlaySound(tmp, winsound.SND_FILENAME)
-                finally:
-                    os.unlink(tmp)
-        else:
-            play_audio_sync(audio_bytes)
+        # Також публікуємо повідомлення в чат Pi-Supertonic
+        try:
+            httpx.post(f"{TTS_SERVER}/api/message", json={"text": text}, timeout=5)
+        except Exception:
+            pass
 
         return True
 

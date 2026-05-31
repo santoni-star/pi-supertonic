@@ -59,6 +59,7 @@ async function init() {
   }
 
   updateSettingsUI();
+  startPolling();  // починаємо слухати відповіді від Pi
 
   // Event listeners
   btnSend.addEventListener('click', sendTextMessage);
@@ -91,6 +92,54 @@ async function init() {
   });
 
   console.log('Pi-Supertonic initialized — мозок: Pi');
+}
+
+// ---------- Polling: отримуємо відповіді від Pi ----------
+
+let _lastMsgId = -1;
+
+async function startPolling() {
+  while (true) {
+    try {
+      const resp = await fetch(`/api/messages?since=${_lastMsgId}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        for (const msg of data.messages || []) {
+          if (msg.id > _lastMsgId && msg.text) {
+            _lastMsgId = msg.id;
+            // Автоматично додаємо в чат
+            const msgId = addMessage(msg.text, 'assistant');
+            // Одразу озвучуємо через TTS
+            try {
+              const ttsResp = await fetch('/api/speak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  text: msg.text,
+                  voice: state.voice,
+                  lang: state.lang,
+                  speed: state.speed,
+                  steps: state.steps,
+                  format: state.format,
+                }),
+              });
+              if (ttsResp.ok) {
+                const ttsData = await ttsResp.json();
+                if (ttsData.audio) {
+                  playAudio(ttsData.audio, ttsData.format, msgId);
+                }
+              }
+            } catch (e) {
+              console.warn('Auto TTS failed:', e);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Polling error:', e);
+    }
+    await new Promise(r => setTimeout(r, 1000));  // кожну секунду
+  }
 }
 
 // ---------- Chat mode: текст → TTS (автоматично) ----------

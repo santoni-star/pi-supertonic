@@ -21,6 +21,11 @@ from server.stt.groq_stt import transcribe_groq
 from server.tts.supertonic_client import synthesize, get_voices, get_languages
 
 
+# Черга повідомлень — я (Pi) пишу сюди відповіді, веб-інтерфейс показує
+message_queue: list[dict] = []
+next_msg_id: int = 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
@@ -107,6 +112,34 @@ async def next_transcript():
 
 
 transcript_queue: list[str] = []
+
+
+# ---------- Чат: повідомлення від Pi ----------
+
+@app.post("/api/message")
+async def post_message(data: dict):
+    """Я (Pi) викликаю цей ендпоінт, щоб моя відповідь з'явилась у веб-чаті."""
+    global next_msg_id
+    msg = {
+        "id": next_msg_id,
+        "role": "assistant",
+        "text": data.get("text", "").strip(),
+    }
+    next_msg_id += 1
+    if msg["text"]:
+        message_queue.append(msg)
+        # тримаємо тільки останні 50
+        while len(message_queue) > 50:
+            message_queue.pop(0)
+    return {"ok": True, "id": msg["id"]}
+
+
+@app.get("/api/messages")
+async def get_messages(since: int = -1):
+    """Веб-інтерфейс отримує нові повідомлення (polling).
+    since — останній отриманий ID."""
+    new_msgs = [m for m in message_queue if m["id"] > since]
+    return {"messages": new_msgs}
 
 
 # ---------- WebSocket (режим realtime) ----------
